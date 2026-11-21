@@ -1,0 +1,1 @@
+import {processModel} from './engine.mjs';onmessage=async e=>{try{const r=await processModel(e.data.positions,e.data.opts,message=>postMessage({message}));postMessage({result:r},[...r.parts,...r.pins].map(p=>p.positions.buffer));}catch(e){postMessage({error:e.message});}};

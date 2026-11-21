@@ -20585,15 +20585,24 @@ var poses = [[0, 0, 0], [90, 0, 0], [-90, 0, 0], [180, 0, 0], [0, 90, 0], [0, -9
 async function processModel(input, o, progress = () => {
 }) {
   const { Manifold: M, Mesh: Mesh2 } = await init(), owned = [];
-  const own = (x) => (owned.push(x), x);
+  const own = (x) => (owned.push(x), x), drop = (x) => {
+    if (!x) return;
+    x.delete();
+    const i = owned.indexOf(x);
+    if (i >= 0) owned.splice(i, 1);
+  };
   try {
     let mesh = new Mesh2({ numProp: 3, vertProperties: input, triVerts: Uint32Array.from({ length: input.length / 3 }, (_, i) => i) });
     mesh.merge();
     let base = own(new M(mesh));
     if (base.status() !== "NoError") throw Error("Le STL doit \xEAtre un volume ferm\xE9 sans auto-intersections. R\xE9pare-le dans Bambu Studio puis r\xE9importe-le.");
-    base = own(base.scale(o.scale / 100));
+    let next = own(base.scale(o.scale / 100));
+    drop(base);
+    base = next;
     let b = base.boundingBox();
-    base = own(base.translate(b.min.map((v) => -v)));
+    next = own(base.translate(b.min.map((v) => -v)));
+    drop(base);
+    base = next;
     let hollowStep = null;
     if (o.hollow) {
       progress("Calcul de la cavit\xE9\u2026");
@@ -20611,25 +20620,34 @@ async function processModel(input, o, progress = () => {
       };
       const cavity = own(M.levelSet(sdf, box, hollowStep));
       if (cavity.isEmpty()) throw Error("Cavit\xE9 impossible avec cette paroi/r\xE9solution.");
-      base = own(base.subtract(cavity));
+      const hollowed = own(base.subtract(cavity));
+      drop(base);
+      drop(cavity);
+      base = hollowed;
       g.dispose();
     }
     const cap = o.volume.map((v) => v - 2 * o.margin);
     if (cap.some((v) => v <= 0)) throw Error("Marge trop grande pour ce volume.");
     let best;
-    for (const pose of o.optimize ? poses : [[0, 0, 0]]) {
+    for (const pose of o.optimize ? poses.slice(0, 6) : [[0, 0, 0]]) {
       const m = own(base.rotate(pose)), b2 = m.boundingBox(), s = b2.max.map((v, i) => v - b2.min[i]), grid = s.map((v, i) => Math.max(1, Math.ceil((v - 1e-3) / cap[i]))), count = grid.reduce((a, v) => a * v, 1), cost = count * 1e6 + overhang(m, o.angle);
-      if (!best || cost < best.cost) best = { m, b: b2, s, grid, cost, pose };
+      if (!best || cost < best.cost) {
+        if (best) drop(best.m);
+        best = { m, b: b2, s, grid, cost, pose };
+      } else drop(m);
     }
     if (best.grid.reduce((a, v) => a * v, 1) > 96) throw Error("Trop de pi\xE8ces. R\xE9duis l\u2019\xE9chelle ou augmente le volume.");
     const raw = [], map = /* @__PURE__ */ new Map();
     for (let x = 0; x < best.grid[0]; x++) for (let y = 0; y < best.grid[1]; y++) for (let z = 0; z < best.grid[2]; z++) {
-      const cell = [x, y, z], lo = cell.map((v, i) => best.b.min[i] + v * best.s[i] / best.grid[i]), sz = best.s.map((v, i) => v / best.grid[i]), cut = own(best.m.intersect(own(M.cube(sz).translate(lo))));
+      const cell = [x, y, z], lo = cell.map((v, i) => best.b.min[i] + v * best.s[i] / best.grid[i]), sz = best.s.map((v, i) => v / best.grid[i]), box = own(M.cube(sz).translate(lo)), cut = own(best.m.intersect(box));
+      drop(box);
       if (!cut.isEmpty() && cut.volume() > 1e-7) {
         map.set(cell.join(","), raw.length);
         raw.push({ m: cut, cell, lo, sz, ids: [] });
-      }
+      } else drop(cut);
     }
+    drop(best.m);
+    drop(base);
     const pins = [], warnings = [];
     if (o.connectors) {
       const dia = o.diameter, rad = (dia + o.clearance) / 2, depth = o.depth, skin = 0.8;
@@ -20650,16 +20668,22 @@ async function processModel(input, o, progress = () => {
           probeAt[axis] += sign * (depth + skin) / 2;
           const pinprobe = cyl(depth + skin, rad + skin, probeAt), test = own(part.m.intersect(pinprobe));
           if (Math.abs(test.volume() - pinprobe.volume()) > Math.max(1e-3, pinprobe.volume() * 2e-3)) fit = false;
+          drop(test);
+          drop(pinprobe);
         }
         if (!fit) {
           warnings.push(`Jonction pi\xE8ces ${i + 1}/${j + 1} trop fine pour le tourillon; coller cette jonction.`);
           continue;
         }
-        const hole = cyl(2 * depth + 0.8, rad, center);
-        A.m = own(A.m.subtract(hole));
-        B.m = own(B.m.subtract(hole));
-        const id = pins.length + 1, p = own(M.cylinder(2 * depth, dia / 2, dia / 2, 32));
-        pins.push({ id, parts: [i + 1, j + 1], positions: geometry(p), diameter: dia, holeDiameter: dia + o.clearance, depth, clearance: o.clearance });
+        const hole = cyl(2 * depth + 0.8, rad, center), aNew = own(A.m.subtract(hole)), bNew = own(B.m.subtract(hole));
+        drop(A.m);
+        drop(B.m);
+        drop(hole);
+        A.m = aNew;
+        B.m = bNew;
+        const id = pins.length + 1, p = own(M.cylinder(2 * depth, dia / 2, dia / 2, 32)), pinPositions = geometry(p);
+        drop(p);
+        pins.push({ id, parts: [i + 1, j + 1], positions: pinPositions, diameter: dia, holeDiameter: dia + o.clearance, depth, clearance: o.clearance });
         A.ids.push(id);
         B.ids.push(id);
       }
@@ -20667,14 +20691,23 @@ async function processModel(input, o, progress = () => {
     const parts = [];
     for (let i = 0; i < raw.length; i++) {
       let pick;
-      for (const pose of o.optimize ? poses : [[0, 0, 0]]) {
+      for (const pose of o.optimize ? poses.slice(0, 6) : [[0, 0, 0]]) {
         const m = own(raw[i].m.rotate(pose)), b2 = m.boundingBox(), s = b2.max.map((v, k) => v - b2.min[k]);
-        if (s.some((v, k) => v > cap[k] + 0.02)) continue;
+        if (s.some((v, k) => v > cap[k] + 0.02)) {
+          drop(m);
+          continue;
+        }
         const score = overhang(m, o.angle);
-        if (!pick || score < pick.score) pick = { m, b: b2, s, pose, score };
+        if (!pick || score < pick.score) {
+          if (pick) drop(pick.m);
+          pick = { m, b: b2, s, pose, score };
+        } else drop(m);
       }
-      const out = own(pick.m.translate(pick.b.min.map((v) => -v)));
-      parts.push({ positions: geometry(out), size: pick.s, offset: pick.b.min, cell: raw[i].cell, pose: pick.pose, overhang: pick.score, volume: out.volume(), connectors: raw[i].ids });
+      const out = own(pick.m.translate(pick.b.min.map((v) => -v))), positions = geometry(out), volume = out.volume();
+      drop(out);
+      drop(pick.m);
+      drop(raw[i].m);
+      parts.push({ positions, size: pick.s, offset: pick.b.min, cell: raw[i].cell, pose: pick.pose, overhang: pick.score, volume, connectors: raw[i].ids });
       progress(`Morceau ${i + 1}/${raw.length}`);
     }
     return { parts, pins, warnings, grid: best.grid, pose: best.pose, hollowStep };
